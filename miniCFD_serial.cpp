@@ -350,7 +350,7 @@ void exchange_border_x( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] ) {
   //////////////////////////////////////////////////////
   // DELETE THE SERIAL CODE BELOW AND REPLACE WITH MPI
   //////////////////////////////////////////////////////
-  //#pragma omp parallel for
+  #pragma omp parallel for
   for (int k=0; k<nnz; k++) { 
     for (int ll=0; ll<NUM_VARS; ll++) {
       //state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + 0      ] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + nnx+hs-2];
@@ -436,8 +436,8 @@ void exchange_border_z( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] ) {
 }
 
 void initialize( int *argc , char ***argv ) {
-  int    i, k, ii, kk, ll;
-  double x, z, r, u, w, t, hr, ht;
+  //int    i, k, ii, kk, ll;
+  //double x, z, r, u, w, t, hr, ht;
 
   //Set the cell grid size
   dx = xlen / nx_cfd;
@@ -497,7 +497,10 @@ void initialize( int *argc , char ***argv ) {
   //////////////////////////////////////////////////////////////////////////
   // Initialize the cell-averaged fluid state via Gauss-Legendre quadrature
   //////////////////////////////////////////////////////////////////////////
-  for (i=0; i<nnx+2*hs; i++) {
+  #pragma omp parallel for
+  for (int i=0; i<nnx+2*hs; i++) {
+    int    k, ii, kk, ll;
+    double x, z, r, u, w, t, hr, ht;
     for (k=0; k<nnz+2*hs; k++) {
       //Initialize the state to zero
       for (ll=0; ll<NUM_VARS; ll++) {
@@ -557,10 +560,12 @@ void initialize( int *argc , char ***argv ) {
     }
   }
   //Compute the background state over vertical cell averages
-  for (k=0; k<nnz+2*hs; k++) {
+  #pragma omp parallel for
+  for (int k=0; k<nnz+2*hs; k++) {
+    double z, r, u, w, t, hr, ht;
     cfd_dens_cell      [k] = 0.;
     cfd_dens_theta_cell[k] = 0.;
-    for (kk=0; kk<nqpoints; kk++) {
+    for (int kk=0; kk<nqpoints; kk++) {
       z = (k_beg + k-hs+0.5)*dz;
       //Set the fluid state based on the user's specification
       if (config_spec == CONFIG_IN_TEST1      ) { testcase1      (0.,z,r,u,w,t,hr,ht); }
@@ -574,7 +579,9 @@ void initialize( int *argc , char ***argv ) {
     }
   }
   //Compute the background state at vertical cell interfaces
-  for (k=0; k<nnz+1; k++) {
+  #pragma omp parallel for
+  for (int k=0; k<nnz+1; k++) {
+    double z, r, u, w, t, hr, ht;
     z = (k_beg + k)*dz;
     if (config_spec == CONFIG_IN_TEST1      ) { testcase1      (0.,z,r,u,w,t,hr,ht); }
     if (config_spec == CONFIG_IN_TEST2        ) { testcase2        (0.,z,r,u,w,t,hr,ht); }
@@ -735,9 +742,9 @@ void finalize() {
 void do_results( double &mass , double &te ) {
   mass = 0;
   te = 0;
-  //#pragma omp parallel for reduction(+:mass_local,te_local)
-  for (int k=0; k<nnz; k++) {
-    for (int i=0; i<nnx; i++) {
+  #pragma omp parallel for reduction(+:mass,te)
+  for (int i=0; i<nnx; i++) {
+    for (int k=0; k<nnz; k++) {
       //int ind_r = POS_DENS*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+hs;
       //int ind_u = POS_UMOM*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+hs;
       //int ind_w = POS_WMOM*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+hs;
