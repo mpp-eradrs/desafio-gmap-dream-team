@@ -10,6 +10,8 @@
 #include <ctime>
 #include <iostream>
 
+#include <omp.h>
+
 const double pi        = 3.14159265358979323846264338327;   //Pi
 const double grav      = 9.8;                               //Gravitational acceleration (m / s^2)
 const double cp        = 1004.;                             //Specific heat of dry air at constant pressure
@@ -55,11 +57,11 @@ int    i_beg, k_beg;          //beginning index in the x- and z-directions for t
 int    nranks, myrank;        //Number of MPI ranks and my rank id
 int    masterproc;            //Am I the master process (rank == 0)?
 int    config_spec;         //Which data initialization to use
-double *cfd_dens_cell;         //density (vert cell avgs).   Dimensions: (1-hs:nnz+hs)
-double *cfd_dens_theta_cell;   //rho*t (vert cell avgs).     Dimensions: (1-hs:nnz+hs)
-double *cfd_dens_int;          //density (vert cell interf). Dimensions: (1:nnz+1)
-double *cfd_dens_theta_int;    //rho*t (vert cell interf).   Dimensions: (1:nnz+1)
-double *cfd_pressure_int;      //press (vert cell interf).   Dimensions: (1:nnz+1)
+double cfd_dens_cell[_NZ+2*hs];         //density (vert cell avgs).   Dimensions: (1-hs:nnz+hs)
+double cfd_dens_theta_cell[_NZ+2*hs];   //rho*t (vert cell avgs).     Dimensions: (1-hs:nnz+hs)
+double cfd_dens_int[_NZ+1];          //density (vert cell interf). Dimensions: (1:nnz+1)
+double cfd_dens_theta_int[_NZ+1];    //rho*t (vert cell interf).   Dimensions: (1:nnz+1)
+double cfd_pressure_int[_NZ+1];      //press (vert cell interf).   Dimensions: (1:nnz+1)
 
 ///////////////////////////////////////////////////////////////////////////////////////
 // Variables that are dynamics over the course of the simulation
@@ -67,14 +69,29 @@ double *cfd_pressure_int;      //press (vert cell interf).   Dimensions: (1:nnz+
 double etime;                 //Elapsed model time
 double output_counter;        //Helps determine when it's time to do output
 //Runtime variable arrays
-double *state;                //Fluid state.             Dimensions: (1-hs:nnx+hs,1-hs:nnz+hs,NUM_VARS)
-double *state_tmp;            //Fluid state.             Dimensions: (1-hs:nnx+hs,1-hs:nnz+hs,NUM_VARS)
-double *flux;                 //Cell interface fluxes.   Dimensions: (nnx+1,nnz+1,NUM_VARS)
-double *tend;                 //Fluid state tendencies.  Dimensions: (nnx,nnz,NUM_VARS)
+// STATIC ALLOC
+double state[_NX+2*hs][_NZ+2*hs][NUM_VARS];                //Fluid state.             Dimensions: (1-hs:nnx+hs,1-hs:nnz+hs,NUM_VARS)
+double state_tmp[_NX+2*hs][_NZ+2*hs][NUM_VARS];            //Fluid state.             Dimensions: (1-hs:nnx+hs,1-hs:nnz+hs,NUM_VARS)
+double flux[_NX+1][_NZ+1][NUM_VARS];                 //Cell interface fluxes.   Dimensions: (nnx+1,nnz+1,NUM_VARS)
+double tend[_NX][_NZ][NUM_VARS];                 //Fluid state tendencies.  Dimensions: (nnx,nnz,NUM_VARS)
 int    num_out = 0;           //The number of outputs performed so far
 int    direction_switch = 1;
 double mass0, te0;            //Initial domain totals for mass and total energy  
 double mass , te ;            //Domain totals for mass and total energy  
+
+/*
+
+  state              = (double *) malloc( (nnx+2*hs)*(nnz+2*hs)*NUM_VARS*sizeof(double) );
+  state_tmp          = (double *) malloc( (nnx+2*hs)*(nnz+2*hs)*NUM_VARS*sizeof(double) );
+  flux               = (double *) malloc( (nnx+1)*(nnz+1)*NUM_VARS*sizeof(double) );
+  tend               = (double *) malloc( nnx*nnz*NUM_VARS*sizeof(double) );
+  cfd_dens_cell       = (double *) malloc( (nnz+2*hs)*sizeof(double) );
+  cfd_dens_theta_cell = (double *) malloc( (nnz+2*hs)*sizeof(double) );
+  cfd_dens_int        = (double *) malloc( (nnz+1)*sizeof(double) );
+  cfd_dens_theta_int  = (double *) malloc( (nnz+1)*sizeof(double) );
+  cfd_pressure_int    = (double *) malloc( (nnz+1)*sizeof(double) );*/
+
+
 
 //How is this not in the standard?!
 double dmin( double a , double b ) { if (a<b) {return a;} else {return b;} };
@@ -93,13 +110,13 @@ void   const_theta    ( double z                   , double &r , double &t );
 void   const_bvfreq   ( double z , double bv_freq0 , double &r , double &t );
 
 double sample_cosine( double x , double z , double amp , double x0 , double z0 , double xrad , double zrad );
-void   output               ( double *state , double etime );
-void   do_timestep     ( double *state , double *state_tmp , double *flux , double *tend , double dt );
-void   do_semi_step   ( double *state_init , double *state_forcing , double *state_out , double dt , int dir , double *flux , double *tend );
-void   do_dir_x ( double *state , double *flux , double *tend );
-void   do_dir_z ( double *state , double *flux , double *tend );
-void   exchange_border_x    ( double *state );
-void   exchange_border_z    ( double *state );
+void   output               ( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double etime );
+void   do_timestep     ( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double state_tmp[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double flux[_NX+1][_NZ+1][NUM_VARS] , double tend[_NX][_NZ][NUM_VARS] , double dt );
+void   do_semi_step   ( double state_init[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double state_forcing[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double state_out[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double dt , int dir , double flux[_NX+1][_NZ+1][NUM_VARS] , double tend[_NX][_NZ][NUM_VARS] );
+void   do_dir_x ( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double flux[_NX+1][_NZ+1][NUM_VARS] , double tend[_NX][_NZ][NUM_VARS] );
+void   do_dir_z ( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double flux[_NX+1][_NZ+1][NUM_VARS] , double tend[_NX][_NZ][NUM_VARS] );
+void   exchange_border_x    ( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] );
+void   exchange_border_z    ( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] );
 void   do_results           ( double &mass , double &te );
 
 //Performs a single dimensionally split time step using a simple low-storate three-stage Runge-Kutta time integrator
@@ -109,12 +126,13 @@ void   do_results           ( double &mass , double &te );
 // q*     = q[n] + dt/3 * rhs(q[n])
 // q**    = q[n] + dt/2 * rhs(q*  )
 // q[n+1] = q[n] + dt/1 * rhs(q** )
-void do_timestep( double *state , double *state_tmp , double *flux , double *tend , double dt ) {
+void do_timestep( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double state_tmp[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double flux[_NX+1][_NZ+1][NUM_VARS] , double tend[_NX][_NZ][NUM_VARS] , double dt ) {
   if (direction_switch) {
     //x-direction first
     do_semi_step( state , state     , state_tmp , dt / 3 , DIR_X , flux , tend );
     do_semi_step( state , state_tmp , state_tmp , dt / 2 , DIR_X , flux , tend );
     do_semi_step( state , state_tmp , state     , dt / 1 , DIR_X , flux , tend );
+    
     //z-direction second
     do_semi_step( state , state     , state_tmp , dt / 3 , DIR_Z , flux , tend );
     do_semi_step( state , state_tmp , state_tmp , dt / 2 , DIR_Z , flux , tend );
@@ -136,8 +154,8 @@ void do_timestep( double *state , double *state_tmp , double *flux , double *ten
 //Perform a single semi-discretized step in time with the form:
 //state_out = state_init + dt * rhs(state_forcing)
 //Meaning the step starts from state_init, computes the rhs using state_forcing, and stores the result in state_out
-void do_semi_step( double *state_init , double *state_forcing , double *state_out , double dt , int dir , double *flux , double *tend ) {
-  int i, k, ll, inds, indt;
+void do_semi_step( double state_init[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double state_forcing[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double state_out[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double dt , int dir , double flux[_NX+1][_NZ+1][NUM_VARS] , double tend[_NX][_NZ][NUM_VARS] ) {
+  //int i, k, ll, inds, indt;
   if        (dir == DIR_X) {
     //Set the halo values for this MPI task's fluid state in the x-direction
     exchange_border_x(state_forcing);
@@ -154,12 +172,14 @@ void do_semi_step( double *state_init , double *state_forcing , double *state_ou
   // TODO: THREAD ME
   /////////////////////////////////////////////////
   //Apply the tendencies to the fluid state
-  for (ll=0; ll<NUM_VARS; ll++) {
-    for (k=0; k<nnz; k++) {
-      for (i=0; i<nnx; i++) {
-        inds = (k+hs)*(nnx+2*hs) + ll*(nnz+2*hs)*(nnx+2*hs) + i+hs;
-        indt = ll*nnz*nnx + k*nnx + i;
-        state_out[inds] = state_init[inds] + dt * tend[indt];
+  #pragma omp parallel for
+  for (int i=0; i<nnx; i++) {
+    for (int k=0; k<nnz; k++) {
+      for (int ll=0; ll<NUM_VARS; ll++) {
+        //inds = (k+hs)*(nnx+2*hs) + ll*(nnz+2*hs)*(nnx+2*hs) + i+hs;
+        //indt = ll*nnz*nnx + k*nnx + i;
+        //state_out[inds] = state_init[inds] + dt * tend[indt];
+        state_out[i+hs][k+hs][ll] = state_init[i+hs][k+hs][ll] + dt * tend[i][k][ll];
       }
     }
   }
@@ -170,22 +190,26 @@ void do_semi_step( double *state_init , double *state_forcing , double *state_ou
 //Since the halos are set in a separate routine, this will not require MPI
 //First, compute the flux vector at each cell interface in the x-direction (including viscosity)
 //Then, compute the tendencies using those fluxes
-void do_dir_x( double *state , double *flux , double *tend ) {
-  int    i,k,ll,s,inds,indf1,indf2,indt;
-  double r,u,w,t,p, stencil[4], d_vals[NUM_VARS], vals[NUM_VARS], v_coef;
+void do_dir_x( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double flux[_NX+1][_NZ+1][NUM_VARS] , double tend[_NX][_NZ][NUM_VARS] ) {
+  //int    i,k,ll,s,inds,indf1,indf2,indt;
+  //double r,u,w,t,p, stencil[4], d_vals[NUM_VARS], vals[NUM_VARS], v_coef;
   //Compute the hyperviscosity coeficient
-  v_coef = -hv * dx / (16*dt);
+  double v_coef = -hv * dx / (16*dt);
   /////////////////////////////////////////////////
   // TODO: THREAD ME
   /////////////////////////////////////////////////
   //Compute fluxes in the x-direction for each cell
-  for (k=0; k<nnz; k++) {
-    for (i=0; i<nnx+1; i++) {
+  #pragma omp parallel for
+  for (int i=0; i<nnx+1; i++) {
+    int    ll,s;
+    double r,u,w,t,p, stencil[4], d_vals[NUM_VARS], vals[NUM_VARS];
+
+    for (int k=0; k<nnz; k++) {
       //Use fourth-order interpolation from four cell averages to compute the value at the interface in question
       for (ll=0; ll<NUM_VARS; ll++) {
         for (s=0; s < cfd_size; s++) {
-          inds = ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+s;
-          stencil[s] = state[inds];
+          //inds = ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+s;
+          stencil[s] = state[i+s][k+hs][ll]; 
         }
         //Fourth-order-accurate interpolation of the state
         vals[ll] = -stencil[0]/12 + 7*stencil[1]/12 + 7*stencil[2]/12 - stencil[3]/12;
@@ -201,10 +225,14 @@ void do_dir_x( double *state , double *flux , double *tend ) {
       p = pow((r*t),gamm)*C0;
 
       //Compute the flux vector
-      flux[POS_DENS*(nnz+1)*(nnx+1) + k*(nnx+1) + i] = r*u     - v_coef*d_vals[POS_DENS];
+      /*flux[POS_DENS*(nnz+1)*(nnx+1) + k*(nnx+1) + i] = r*u     - v_coef*d_vals[POS_DENS];
       flux[POS_UMOM*(nnz+1)*(nnx+1) + k*(nnx+1) + i] = r*u*u+p - v_coef*d_vals[POS_UMOM];
       flux[POS_WMOM*(nnz+1)*(nnx+1) + k*(nnx+1) + i] = r*u*w   - v_coef*d_vals[POS_WMOM];
-      flux[POS_RHOT*(nnz+1)*(nnx+1) + k*(nnx+1) + i] = r*u*t   - v_coef*d_vals[POS_RHOT];
+      flux[POS_RHOT*(nnz+1)*(nnx+1) + k*(nnx+1) + i] = r*u*t   - v_coef*d_vals[POS_RHOT];*/
+      flux[i][k][POS_DENS] = r*u     - v_coef*d_vals[POS_DENS];
+      flux[i][k][POS_UMOM] = r*u*u+p - v_coef*d_vals[POS_UMOM];
+      flux[i][k][POS_WMOM] = r*u*w   - v_coef*d_vals[POS_WMOM];
+      flux[i][k][POS_RHOT] = r*u*t   - v_coef*d_vals[POS_RHOT];
     }
   }
 
@@ -212,13 +240,15 @@ void do_dir_x( double *state , double *flux , double *tend ) {
   // TODO: THREAD ME
   /////////////////////////////////////////////////
   //Use the fluxes to compute tendencies for each cell
-  for (ll=0; ll<NUM_VARS; ll++) {
-    for (k=0; k<nnz; k++) {
-      for (i=0; i<nnx; i++) {
-        indt  = ll* nnz   * nnx    + k* nnx    + i  ;
-        indf1 = ll*(nnz+1)*(nnx+1) + k*(nnx+1) + i  ;
-        indf2 = ll*(nnz+1)*(nnx+1) + k*(nnx+1) + i+1;
-        tend[indt] = -( flux[indf2] - flux[indf1] ) / dx;
+  #pragma omp parallel for
+  for (int i=0; i<nnx; i++) {
+    for (int k=0; k<nnz; k++) {
+      for (int ll=0; ll<NUM_VARS; ll++) {
+        //indt  = ll* nnz   * nnx    + k* nnx    + i  ;
+        //indf1 = ll*(nnz+1)*(nnx+1) + k*(nnx+1) + i  ;
+        //indf2 = ll*(nnz+1)*(nnx+1) + k*(nnx+1) + i+1;
+        //tend[indt] = -( flux[indf2] - flux[indf1] ) / dx;
+        tend[i][k][ll] = -( flux[i+1][k][ll] - flux[i][k][ll] ) / dx;
       }
     }
   }
@@ -229,22 +259,26 @@ void do_dir_x( double *state , double *flux , double *tend ) {
 //Since the halos are set in a separate routine, this will not require MPI
 //First, compute the flux vector at each cell interface in the z-direction (including viscosity)
 //Then, compute the tendencies using those fluxes
-void do_dir_z( double *state , double *flux , double *tend ) {
-  int    i,k,ll,s, inds, indf1, indf2, indt;
-  double r,u,w,t,p, stencil[4], d_vals[NUM_VARS], vals[NUM_VARS], v_coef;
+void do_dir_z( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double flux[_NX+1][_NZ+1][NUM_VARS] , double tend[_NX][_NZ][NUM_VARS] ) {
+  //int    i,k,ll,s, inds, indf1, indf2, indt;
+  //double r,u,w,t,p, stencil[4], d_vals[NUM_VARS], vals[NUM_VARS], v_coef;
   //Compute the viscosity coeficient
-  v_coef = -hv * dz / (16*dt);
+  double v_coef = -hv * dz / (16*dt);
   /////////////////////////////////////////////////
   // TODO: THREAD ME
   /////////////////////////////////////////////////
   //Compute fluxes in the x-direction for each cell
-  for (k=0; k<nnz+1; k++) {
-    for (i=0; i<nnx; i++) {
+  #pragma omp parallel for
+  for (int i=0; i<nnx; i++) {
+    int    ll,s;
+    double r,u,w,t,p, stencil[4], d_vals[NUM_VARS], vals[NUM_VARS];
+
+    for (int k=0; k<nnz+1; k++) {
       //Use fourth-order interpolation from four cell averages to compute the value at the interface in question
       for (ll=0; ll<NUM_VARS; ll++) {
         for (s=0; s<cfd_size; s++) {
-          inds = ll*(nnz+2*hs)*(nnx+2*hs) + (k+s)*(nnx+2*hs) + i+hs;
-          stencil[s] = state[inds];
+          //inds = ll*(nnz+2*hs)*(nnx+2*hs) + (k+s)*(nnx+2*hs) + i+hs;
+          stencil[s] = state[i+hs][k+s][ll]; 
         }
         //Fourth-order-accurate interpolation of the state
         vals[ll] = -stencil[0]/12 + 7*stencil[1]/12 + 7*stencil[2]/12 - stencil[3]/12;
@@ -265,10 +299,14 @@ void do_dir_z( double *state , double *flux , double *tend ) {
       }
 
       //Compute the flux vector with viscosity
-      flux[POS_DENS*(nnz+1)*(nnx+1) + k*(nnx+1) + i] = r*w     - v_coef*d_vals[POS_DENS];
+      /*flux[POS_DENS*(nnz+1)*(nnx+1) + k*(nnx+1) + i] = r*w     - v_coef*d_vals[POS_DENS];
       flux[POS_UMOM*(nnz+1)*(nnx+1) + k*(nnx+1) + i] = r*w*u   - v_coef*d_vals[POS_UMOM];
       flux[POS_WMOM*(nnz+1)*(nnx+1) + k*(nnx+1) + i] = r*w*w+p - v_coef*d_vals[POS_WMOM];
-      flux[POS_RHOT*(nnz+1)*(nnx+1) + k*(nnx+1) + i] = r*w*t   - v_coef*d_vals[POS_RHOT];
+      flux[POS_RHOT*(nnz+1)*(nnx+1) + k*(nnx+1) + i] = r*w*t   - v_coef*d_vals[POS_RHOT];*/
+      flux[i][k][POS_DENS] = r*w     - v_coef*d_vals[POS_DENS];
+      flux[i][k][POS_UMOM] = r*w*u   - v_coef*d_vals[POS_UMOM];
+      flux[i][k][POS_WMOM] = r*w*w+p - v_coef*d_vals[POS_WMOM];
+      flux[i][k][POS_RHOT] = r*w*t   - v_coef*d_vals[POS_RHOT];
     }
   }
 
@@ -276,16 +314,19 @@ void do_dir_z( double *state , double *flux , double *tend ) {
   // TODO: THREAD ME
   /////////////////////////////////////////////////
   //Use the fluxes to compute tendencies for each cell
-  for (ll=0; ll<NUM_VARS; ll++) {
-    for (k=0; k<nnz; k++) {
-      for (i=0; i<nnx; i++) {
-        indt  = ll* nnz   * nnx    + k* nnx    + i  ;
-        indf1 = ll*(nnz+1)*(nnx+1) + (k  )*(nnx+1) + i;
-        indf2 = ll*(nnz+1)*(nnx+1) + (k+1)*(nnx+1) + i;
-        tend[indt] = -( flux[indf2] - flux[indf1] ) / dz;
+  #pragma omp parallel for
+  for (int i=0; i<nnx; i++) {
+    for (int k=0; k<nnz; k++) {
+      for (int ll=0; ll<NUM_VARS; ll++) {
+        //indt  = ll* nnz   * nnx    + k* nnx    + i  ;
+        //indf1 = ll*(nnz+1)*(nnx+1) + (k  )*(nnx+1) + i;
+        //indf2 = ll*(nnz+1)*(nnx+1) + (k+1)*(nnx+1) + i;
+        //tend[indt] = -( flux[indf2] - flux[indf1] ) / dz;
+        tend[i][k][ll] = -( flux[i][k+1][ll] - flux[i][k][ll] ) / dz;
         if (ll == POS_WMOM) {
-          inds = POS_DENS*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+hs;
-          tend[indt] = tend[indt] - state[inds]*grav;
+          //inds = POS_DENS*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+hs;
+          //tend[indt] = tend[indt] - state[inds]*grav;
+          tend[i][k][ll] = tend[i][k][ll] - state[i+hs][k+hs][POS_DENS]*grav;
         }
       }
     }
@@ -295,9 +336,9 @@ void do_dir_z( double *state , double *flux , double *tend ) {
 
 
 //Set this MPI task's halo values in the x-direction. This routine will require MPI
-void exchange_border_x( double *state ) {
-  int k, ll, ind_r, ind_u, ind_t, i;
-  double z;
+void exchange_border_x( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] ) {
+  //int k, ll, i;
+  //double z;
   ////////////////////////////////////////////////////////////////////////
   // TODO: EXCHANGE HALO VALUES WITH NEIGHBORING MPI TASKS
   // (1) give    state(1:hs,1:nnz,1:NUM_VARS)       to   my left  neighbor
@@ -309,27 +350,35 @@ void exchange_border_x( double *state ) {
   //////////////////////////////////////////////////////
   // DELETE THE SERIAL CODE BELOW AND REPLACE WITH MPI
   //////////////////////////////////////////////////////
-  for (ll=0; ll<NUM_VARS; ll++) {
-    for (k=0; k<nnz; k++) {
-      state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + 0      ] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + nnx+hs-2];
-      state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + 1      ] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + nnx+hs-1];
-      state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + nnx+hs  ] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + hs     ];
-      state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + nnx+hs+1] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + hs+1   ];
+  //#pragma omp parallel for
+  for (int k=0; k<nnz; k++) { 
+    for (int ll=0; ll<NUM_VARS; ll++) {
+      //state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + 0      ] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + nnx+hs-2];
+      state[0][k+hs][ll] = state[nnx+hs-2][k+hs][ll];
+      //state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + 1      ] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + nnx+hs-1];
+      state[1][k+hs][ll] = state[nnx+hs-1][k+hs][ll];
+      //state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + nnx+hs  ] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + hs     ];
+      state[nnx+hs][k+hs][ll] = state[hs][k+hs][ll];
+      //state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + nnx+hs+1] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + hs+1   ];
+      state[nnx+hs+1][k+hs][ll] = state[hs+1][k+hs][ll];
     }
   }
   ////////////////////////////////////////////////////
 
   if (config_spec == CONFIG_IN_TEST6) {
     if (myrank == 0) {
-      for (k=0; k<nnz; k++) {
-        for (i=0; i<hs; i++) {
-          z = (k_beg + k+0.5)*dz;
+      //#pragma omp parallel for
+      for (int i=0; i<hs; i++) {
+        for (int k=0; k<nnz; k++) {
+          double z = (k_beg + k+0.5)*dz;
           if (fabs(z-3*zlen/4) <= zlen/16) {
-            ind_r = POS_DENS*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i;
-            ind_u = POS_UMOM*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i;
-            ind_t = POS_RHOT*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i;
-            state[ind_u] = (state[ind_r]+cfd_dens_cell[k+hs]) * 50.;
-            state[ind_t] = (state[ind_r]+cfd_dens_cell[k+hs]) * 298. - cfd_dens_theta_cell[k+hs];
+            //ind_r = POS_DENS*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i;
+            //ind_u = POS_UMOM*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i;
+            //ind_t = POS_RHOT*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i;
+            //state[ind_u] = (state[ind_r]+cfd_dens_cell[k+hs]) * 50.;
+            state[i][k+hs][POS_UMOM] = (state[i][k+hs][POS_DENS]+cfd_dens_cell[k+hs]) * 50.;
+            //state[ind_t] = (state[ind_r]+cfd_dens_cell[k+hs]) * 298. - cfd_dens_theta_cell[k+hs];
+            state[i][k+hs][POS_RHOT] = (state[i][k+hs][POS_DENS]) * 298. - cfd_dens_theta_cell[k+hs];
           }
         }
       }
@@ -340,20 +389,24 @@ void exchange_border_x( double *state ) {
 
 //Set this MPI task's halo values in the z-direction. This does not require MPI because there is no MPI
 //decomposition in the vertical direction
-void exchange_border_z( double *state ) {
-  int          i, ll;
+void exchange_border_z( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] ) {
   const double mnt_width = xlen/8;
-  double       x, xloc, mnt_deriv;
   /////////////////////////////////////////////////
   // TODO: THREAD ME
   /////////////////////////////////////////////////
-  for (ll=0; ll<NUM_VARS; ll++) {
-    for (i=0; i<nnx+2*hs; i++) {
+  #pragma omp parallel for
+  for (int i=0; i<nnx+2*hs; i++) {
+    double       x, xloc, mnt_deriv;
+    for (int ll=0; ll<NUM_VARS; ll++) {
       if (ll == POS_WMOM) {
-        state[ll*(nnz+2*hs)*(nnx+2*hs) + (0      )*(nnx+2*hs) + i] = 0.;
-        state[ll*(nnz+2*hs)*(nnx+2*hs) + (1      )*(nnx+2*hs) + i] = 0.;
-        state[ll*(nnz+2*hs)*(nnx+2*hs) + (nnz+hs  )*(nnx+2*hs) + i] = 0.;
-        state[ll*(nnz+2*hs)*(nnx+2*hs) + (nnz+hs+1)*(nnx+2*hs) + i] = 0.;
+        //state[ll*(nnz+2*hs)*(nnx+2*hs) + (0      )*(nnx+2*hs) + i] = 0.;
+        state[i][0][ll] = 0.;
+        //state[ll*(nnz+2*hs)*(nnx+2*hs) + (1      )*(nnx+2*hs) + i] = 0.;
+        state[i][1][ll] = 0.;
+        //state[ll*(nnz+2*hs)*(nnx+2*hs) + (nnz+hs  )*(nnx+2*hs) + i] = 0.;
+        state[i][nnz+hs][ll] = 0.;
+        //state[ll*(nnz+2*hs)*(nnx+2*hs) + (nnz+hs+1)*(nnx+2*hs) + i] = 0.;
+        state[i][nnz+hs+1][ll] = 0.;
         //Impose the vertical momentum effects of an artificial cos^2 mountain at the lower boundary
         if (config_spec == CONFIG_IN_TEST3) {
           x = (i_beg+i-hs+0.5)*dx;
@@ -362,23 +415,28 @@ void exchange_border_z( double *state ) {
             //Compute the derivative of the fake mountain
             mnt_deriv = -pi*cos(pi*xloc/2)*sin(pi*xloc/2)*10/dx;
             //w = (dz/dx)*u
-            state[POS_WMOM*(nnz+2*hs)*(nnx+2*hs) + (0)*(nnx+2*hs) + i] = mnt_deriv*state[POS_UMOM*(nnz+2*hs)*(nnx+2*hs) + hs*(nnx+2*hs) + i];
-            state[POS_WMOM*(nnz+2*hs)*(nnx+2*hs) + (1)*(nnx+2*hs) + i] = mnt_deriv*state[POS_UMOM*(nnz+2*hs)*(nnx+2*hs) + hs*(nnx+2*hs) + i];
+            //state[POS_WMOM*(nnz+2*hs)*(nnx+2*hs) + (0)*(nnx+2*hs) + i] = mnt_deriv*state[POS_UMOM*(nnz+2*hs)*(nnx+2*hs) + hs*(nnx+2*hs) + i];
+            state[i][0][POS_WMOM] = mnt_deriv*state[i][hs][POS_UMOM];
+            //state[POS_WMOM*(nnz+2*hs)*(nnx+2*hs) + (1)*(nnx+2*hs) + i] = mnt_deriv*state[POS_UMOM*(nnz+2*hs)*(nnx+2*hs) + hs*(nnx+2*hs) + i];
+            state[i][1][POS_WMOM] = mnt_deriv*state[i][hs][POS_UMOM];
           }
         }
       } else {
-        state[ll*(nnz+2*hs)*(nnx+2*hs) + (0      )*(nnx+2*hs) + i] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (hs     )*(nnx+2*hs) + i];
-        state[ll*(nnz+2*hs)*(nnx+2*hs) + (1      )*(nnx+2*hs) + i] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (hs     )*(nnx+2*hs) + i];
-        state[ll*(nnz+2*hs)*(nnx+2*hs) + (nnz+hs  )*(nnx+2*hs) + i] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (nnz+hs-1)*(nnx+2*hs) + i];
-        state[ll*(nnz+2*hs)*(nnx+2*hs) + (nnz+hs+1)*(nnx+2*hs) + i] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (nnz+hs-1)*(nnx+2*hs) + i];
+        //state[ll*(nnz+2*hs)*(nnx+2*hs) + (0      )*(nnx+2*hs) + i] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (hs     )*(nnx+2*hs) + i];
+        state[i][0][ll] = state[i][hs][ll];
+        //state[ll*(nnz+2*hs)*(nnx+2*hs) + (1      )*(nnx+2*hs) + i] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (hs     )*(nnx+2*hs) + i];
+        state[i][1][ll] = state[i][hs][ll];
+        //state[ll*(nnz+2*hs)*(nnx+2*hs) + (nnz+hs  )*(nnx+2*hs) + i] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (nnz+hs-1)*(nnx+2*hs) + i];
+        state[i][nnz+hs][ll] = state[i][nnz+hs-1][ll];
+        //state[ll*(nnz+2*hs)*(nnx+2*hs) + (nnz+hs+1)*(nnx+2*hs) + i] = state[ll*(nnz+2*hs)*(nnx+2*hs) + (nnz+hs-1)*(nnx+2*hs) + i];
+        state[i][nnz+hs+1][ll] = state[i][nnz+hs-1][ll];
       }
     }
   }
 }
 
-
 void initialize( int *argc , char ***argv ) {
-  int    i, k, ii, kk, ll, inds;
+  int    i, k, ii, kk, ll;
   double x, z, r, u, w, t, hr, ht;
 
   //Set the cell grid size
@@ -414,7 +472,7 @@ void initialize( int *argc , char ***argv ) {
   masterproc = (myrank == 0);
 
   //Allocate the model data
-  state              = (double *) malloc( (nnx+2*hs)*(nnz+2*hs)*NUM_VARS*sizeof(double) );
+  /*state              = (double *) malloc( (nnx+2*hs)*(nnz+2*hs)*NUM_VARS*sizeof(double) );
   state_tmp          = (double *) malloc( (nnx+2*hs)*(nnz+2*hs)*NUM_VARS*sizeof(double) );
   flux               = (double *) malloc( (nnx+1)*(nnz+1)*NUM_VARS*sizeof(double) );
   tend               = (double *) malloc( nnx*nnz*NUM_VARS*sizeof(double) );
@@ -422,7 +480,7 @@ void initialize( int *argc , char ***argv ) {
   cfd_dens_theta_cell = (double *) malloc( (nnz+2*hs)*sizeof(double) );
   cfd_dens_int        = (double *) malloc( (nnz+1)*sizeof(double) );
   cfd_dens_theta_int  = (double *) malloc( (nnz+1)*sizeof(double) );
-  cfd_pressure_int    = (double *) malloc( (nnz+1)*sizeof(double) );
+  cfd_pressure_int    = (double *) malloc( (nnz+1)*sizeof(double) );*/
 
   //Define the maximum stable time step based on an assumed maximum wind speed
   dt = dmin(dx,dz) / max_speed * cfl;
@@ -439,12 +497,13 @@ void initialize( int *argc , char ***argv ) {
   //////////////////////////////////////////////////////////////////////////
   // Initialize the cell-averaged fluid state via Gauss-Legendre quadrature
   //////////////////////////////////////////////////////////////////////////
-  for (k=0; k<nnz+2*hs; k++) {
-    for (i=0; i<nnx+2*hs; i++) {
+  for (i=0; i<nnx+2*hs; i++) {
+    for (k=0; k<nnz+2*hs; k++) {
       //Initialize the state to zero
       for (ll=0; ll<NUM_VARS; ll++) {
-        inds = ll*(nnz+2*hs)*(nnx+2*hs) + k*(nnx+2*hs) + i;
-        state[inds] = 0.;
+        //inds = ll*(nnz+2*hs)*(nnx+2*hs) + k*(nnx+2*hs) + i;
+        //state[inds] = 0.;
+        state[i][k][ll] = 0.;
       }
       //Use Gauss-Legendre quadrature to initialize a balance + temperature perturbation
       for (kk=0; kk<nqpoints; kk++) {
@@ -476,19 +535,24 @@ void initialize( int *argc , char ***argv ) {
           }
 
           //Store into the fluid state array
-          inds = POS_DENS*(nnz+2*hs)*(nnx+2*hs) + k*(nnx+2*hs) + i;
-          state[inds] = state[inds] + r                         * qweights[ii]*qweights[kk];
-          inds = POS_UMOM*(nnz+2*hs)*(nnx+2*hs) + k*(nnx+2*hs) + i;
-          state[inds] = state[inds] + (r+hr)*u                  * qweights[ii]*qweights[kk];
-          inds = POS_WMOM*(nnz+2*hs)*(nnx+2*hs) + k*(nnx+2*hs) + i;
-          state[inds] = state[inds] + (r+hr)*w                  * qweights[ii]*qweights[kk];
-          inds = POS_RHOT*(nnz+2*hs)*(nnx+2*hs) + k*(nnx+2*hs) + i;
-          state[inds] = state[inds] + ( (r+hr)*(t+ht) - hr*ht ) * qweights[ii]*qweights[kk];
+          //inds = POS_DENS*(nnz+2*hs)*(nnx+2*hs) + k*(nnx+2*hs) + i;
+          //state[inds] = state[inds] + r                         * qweights[ii]*qweights[kk];
+          state[i][k][POS_DENS] = state[i][k][POS_DENS]  + r                         * qweights[ii]*qweights[kk];
+          //inds = POS_UMOM*(nnz+2*hs)*(nnx+2*hs) + k*(nnx+2*hs) + i;
+          //state[inds] = state[inds] + (r+hr)*u                  * qweights[ii]*qweights[kk];
+          state[i][k][POS_UMOM] = state[i][k][POS_UMOM] + (r+hr)*u                  * qweights[ii]*qweights[kk];
+          //inds = POS_WMOM*(nnz+2*hs)*(nnx+2*hs) + k*(nnx+2*hs) + i;
+          //state[inds] = state[inds] + (r+hr)*w                  * qweights[ii]*qweights[kk];
+          state[i][k][POS_WMOM] = state[i][k][POS_WMOM] + (r+hr)*w                  * qweights[ii]*qweights[kk];
+          //inds = POS_RHOT*(nnz+2*hs)*(nnx+2*hs) + k*(nnx+2*hs) + i;
+          //state[inds] = state[inds] + ( (r+hr)*(t+ht) - hr*ht ) * qweights[ii]*qweights[kk];
+          state[i][k][POS_RHOT] = state[i][k][POS_RHOT] + ( (r+hr)*(t+ht) - hr*ht ) * qweights[ii]*qweights[kk];
         }
       }
       for (ll=0; ll<NUM_VARS; ll++) {
-        inds = ll*(nnz+2*hs)*(nnx+2*hs) + k*(nnx+2*hs) + i;
-        state_tmp[inds] = state[inds];
+        //inds = ll*(nnz+2*hs)*(nnx+2*hs) + k*(nnx+2*hs) + i;
+        //state_tmp[inds] = state[inds];
+        state_tmp[i][k][ll] = state[i][k][ll];
       }
     }
   }
@@ -655,7 +719,7 @@ double sample_cosine( double x , double z , double amp , double x0 , double z0 ,
 }
 
 void finalize() {
-  free( state );
+  /*free( state );
   free( state_tmp );
   free( flux );
   free( tend );
@@ -663,28 +727,34 @@ void finalize() {
   free( cfd_dens_theta_cell );
   free( cfd_dens_int );
   free( cfd_dens_theta_int );
-  free( cfd_pressure_int );
+  free( cfd_pressure_int );*/
 }
 
 
 //Compute reduced quantities for error checking without resorting
 void do_results( double &mass , double &te ) {
   mass = 0;
-  te   = 0;
+  te = 0;
+  //#pragma omp parallel for reduction(+:mass_local,te_local)
   for (int k=0; k<nnz; k++) {
     for (int i=0; i<nnx; i++) {
-      int ind_r = POS_DENS*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+hs;
-      int ind_u = POS_UMOM*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+hs;
-      int ind_w = POS_WMOM*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+hs;
-      int ind_t = POS_RHOT*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+hs;
-      double r  =   state[ind_r] + cfd_dens_cell[hs+k];             // Density
-      double u  =   state[ind_u] / r;                              // U-wind
-      double w  =   state[ind_w] / r;                              // W-wind
-      double th = ( state[ind_t] + cfd_dens_theta_cell[hs+k] ) / r; // Potential Temperature (theta)
+      //int ind_r = POS_DENS*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+hs;
+      //int ind_u = POS_UMOM*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+hs;
+      //int ind_w = POS_WMOM*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+hs;
+      //int ind_t = POS_RHOT*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+hs;
+
+      //double r  =   state[ind_r] + cfd_dens_cell[hs+k];             // Density
+      double r  =   state[i+hs][k+hs][POS_DENS] + cfd_dens_cell[hs+k];             // Density
+      //double u  =   state[ind_u] / r;                              // U-wind
+      double u  =   state[i+hs][k+hs][POS_UMOM] / r;                              // U-wind
+      //double w  =   state[ind_w] / r;                              // W-wind
+      double w  =   state[i+hs][k+hs][POS_WMOM] / r;                              // W-wind
+      //double th = ( state[ind_t] + cfd_dens_theta_cell[hs+k] ) / r; // Potential Temperature (theta)
+      double th = ( state[i+hs][k+hs][POS_RHOT] + cfd_dens_theta_cell[hs+k] ) / r; // Potential Temperature (theta)
       double p  = C0*pow(r*th,gamm);                               // Pressure
       double t  = th / pow(p0/p,rd/cp);                            // Temperature
       double ke = r*(u*u+w*w);                                     // Kinetic Energy
-      double ie = r*cv*t;                                          // Internal Energy
+      double ie = r*cv*t;                                         // Internal Energy
       mass += r        *dx*dz; // Accumulate domain mass
       te   += (ke + ie)*dx*dz; // Accumulate domain total energy
     }
@@ -719,12 +789,14 @@ int main(int argc, char **argv) {
   // MAIN TIME STEP LOOP
   ////////////////////////////////////////////////////
   auto c_start = std::clock();
+
   while (etime < sim_time) {
     //If the time step leads to exceeding the simulation time, shorten it for the last step
     if (etime + dt > sim_time) { dt = sim_time - etime; }
     //Perform a single time step
     do_timestep(state,state_tmp,flux,tend,dt);
     //Update the elapsed time and output counter
+    
     etime = etime + dt;
     output_counter = output_counter + dt;
     //If it's time for output, reset the counter, and do output
@@ -734,6 +806,7 @@ int main(int argc, char **argv) {
       if (masterproc) { printf( "Elapsed Time: %lf / %lf\n", etime , sim_time ); }  
     }
   }
+
   auto c_end = std::clock();
   if (masterproc) {
     std::cout << "CPU Time: " << ( (double) (c_end-c_start) ) / CLOCKS_PER_SEC << " sec\n";
