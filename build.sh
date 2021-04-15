@@ -7,7 +7,6 @@ FREQ=100
 CONFIG=CONFIG_IN_TEST1
 SIM_TIME=400
 
-module load intel/compiler/19.1.3.304
 
 # TODO modifique a compilacao do programa abaixo se precisar
 icpc -Wall -O3 -D_NX=$NX -D_NZ=$NZ -D_SIM_TIME=$SIM_TIME -D_OUT_FREQ=$FREQ -D_IN_CONFIG=$CONFIG -o miniCFD miniCFD_serial.cpp -fopenmp 
