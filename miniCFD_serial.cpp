@@ -742,7 +742,7 @@ void finalize() {
 void do_results( double &mass , double &te ) {
   mass = 0;
   te = 0;
-  #pragma omp parallel for reduction(+:mass,te)
+  // #pragma omp parallel for reduction(+:mass,te)
   for (int i=0; i<nnx; i++) {
     for (int k=0; k<nnz; k++) {
       //int ind_r = POS_DENS*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+hs;
