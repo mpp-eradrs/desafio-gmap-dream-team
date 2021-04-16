@@ -199,15 +199,14 @@ void do_dir_x( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double flux[_NX+1][_
   // TODO: THREAD ME
   /////////////////////////////////////////////////
   //Compute fluxes in the x-direction for each cell
-  #pragma omp parallel for
+  double stencil[4], d_vals[NUM_VARS], vals[NUM_VARS];
+  #pragma omp parallel for private(stencil, d_vals, vals)
   for (int i=0; i<nnx+1; i++) {
-    int    ll,s;
-    double r,u,w,t,p, stencil[4], d_vals[NUM_VARS], vals[NUM_VARS];
-
     for (int k=0; k<nnz; k++) {
       //Use fourth-order interpolation from four cell averages to compute the value at the interface in question
-      for (ll=0; ll<NUM_VARS; ll++) {
-        for (s=0; s < cfd_size; s++) {
+      #pragma vector vectorlength(4)
+      for (int ll=0; ll<NUM_VARS; ll++) {
+        for (int s=0; s < cfd_size; s++) {
           //inds = ll*(nnz+2*hs)*(nnx+2*hs) + (k+hs)*(nnx+2*hs) + i+s;
           stencil[s] = state[i+s][k+hs][ll]; 
         }
@@ -218,11 +217,11 @@ void do_dir_x( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double flux[_NX+1][_
       }
 
       //Compute density, u-wind, w-wind, potential temperature, and pressure (r,u,w,t,p respectively)
-      r = vals[POS_DENS] + cfd_dens_cell[k+hs];
-      u = vals[POS_UMOM] / r;
-      w = vals[POS_WMOM] / r;
-      t = ( cfd_dens_theta_cell[k+hs] + vals[POS_RHOT] ) / r;
-      p = pow((r*t),gamm)*C0;
+      double r = vals[POS_DENS] + cfd_dens_cell[k+hs];
+      double u = vals[POS_UMOM] / r;
+      double w = vals[POS_WMOM] / r;
+      double t = ( cfd_dens_theta_cell[k+hs] + vals[POS_RHOT] ) / r;
+      double p = pow((r*t),gamm)*C0;
 
       //Compute the flux vector
       /*flux[POS_DENS*(nnz+1)*(nnx+1) + k*(nnx+1) + i] = r*u     - v_coef*d_vals[POS_DENS];
@@ -268,15 +267,14 @@ void do_dir_z( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double flux[_NX+1][_
   // TODO: THREAD ME
   /////////////////////////////////////////////////
   //Compute fluxes in the x-direction for each cell
-  #pragma omp parallel for
+  double stencil[4], d_vals[NUM_VARS], vals[NUM_VARS];
+  #pragma omp parallel for private(stencil, d_vals, vals)
   for (int i=0; i<nnx; i++) {
-    int    ll,s;
-    double r,u,w,t,p, stencil[4], d_vals[NUM_VARS], vals[NUM_VARS];
-
     for (int k=0; k<nnz+1; k++) {
       //Use fourth-order interpolation from four cell averages to compute the value at the interface in question
-      for (ll=0; ll<NUM_VARS; ll++) {
-        for (s=0; s<cfd_size; s++) {
+      #pragma vector vectorlength(4)
+      for (int ll=0; ll<NUM_VARS; ll++) {
+        for (int s=0; s<cfd_size; s++) {
           //inds = ll*(nnz+2*hs)*(nnx+2*hs) + (k+s)*(nnx+2*hs) + i+hs;
           stencil[s] = state[i+hs][k+s][ll]; 
         }
@@ -287,11 +285,11 @@ void do_dir_z( double state[_NX+2*hs][_NZ+2*hs][NUM_VARS] , double flux[_NX+1][_
       }
 
       //Compute density, u-wind, w-wind, potential temperature, and pressure (r,u,w,t,p respectively)
-      r = vals[POS_DENS] + cfd_dens_int[k];
-      u = vals[POS_UMOM] / r;
-      w = vals[POS_WMOM] / r;
-      t = ( vals[POS_RHOT] + cfd_dens_theta_int[k] ) / r;
-      p = C0*pow((r*t),gamm) - cfd_pressure_int[k];
+      double r = vals[POS_DENS] + cfd_dens_int[k];
+      double u = vals[POS_UMOM] / r;
+      double w = vals[POS_WMOM] / r;
+      double t = ( vals[POS_RHOT] + cfd_dens_theta_int[k] ) / r;
+      double p = C0*pow((r*t),gamm) - cfd_pressure_int[k];
       //Enforce vertical boundary condition and exact mass conservation
       if (k == 0 || k == nnz) {
         w                = 0;
